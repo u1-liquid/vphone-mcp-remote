@@ -7,6 +7,7 @@ MCP server for programmatic control of vphone-cli iOS VMs.
 - **Install:** `uv sync`
 - **Run (stdio, default):** `uv run vphone-mcp`
 - **Run (remote):** `VPHONE_MCP_AUTH_TOKEN=... uv run vphone-mcp --transport http --host 0.0.0.0`
+- **Run (remote, always-on):** `./contrib/launchd/install.sh` — LaunchAgent on `0.0.0.0:8765`, fixed token in `~/.vphone/mcp-auth-token` (0600), log at `~/Library/Logs/vphone-mcp.log`
 - **Test:** `uv run python -c "from vphone_mcp.client import VPhoneClient; print(VPhoneClient('/path/to/vm/vphone.sock').screenshot('/tmp/test.png'))"`
 - **Env probe:** `vphone_status` tool reports CLI binary, socket, VM list, and running launches without raising.
 

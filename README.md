@@ -122,6 +122,21 @@ Notes:
 - Paths in tool arguments (e.g. `screenshot(save_path=...)`, `vm_export(out=...)`)
   resolve on the **server** host, not the client's — see file access below.
 
+#### Run it at login (launchd, macOS)
+
+`contrib/launchd/install.sh` installs a LaunchAgent that serves
+`0.0.0.0:8765` at login with one fixed token, and prints the client config:
+
+```bash
+./contrib/launchd/install.sh
+```
+
+The token is generated once into `~/.vphone/mcp-auth-token` (0600) and reused by
+later re-installs, so configured clients keep working; the plist points
+`VPHONE_MCP_AUTH_TOKEN_FILE` at it rather than carrying the value. Host, port,
+public URL and the token itself are overridable from the environment — see
+[contrib/launchd/README.md](contrib/launchd/README.md).
+
 #### File access
 
 Tools name files on the server's disk: the full-resolution screenshot, the
