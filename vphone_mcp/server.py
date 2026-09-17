@@ -5,7 +5,6 @@ import json
 import os
 import shutil
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
@@ -31,6 +30,7 @@ from .cli import (
     run_background,
 )
 from .client import VPhoneClient, image_block
+from . import files
 
 mcp = FastMCP("vphone")
 
@@ -149,14 +149,23 @@ def screenshot(
 
     Saves the full-resolution PNG to save_path when given (any directory
     the agent chooses, e.g. an evidence folder), otherwise to
-    /tmp/vphone-mcp-screen.png. Returns the socket's compact grayscale
-    preview inline. Set include_full_png=True to also embed the full PNG
-    inline (large — prefer reading the saved file directly instead).
+    <tmp>/vphone-mcp/screen.png — which is overwritten by the next default
+    capture, so pass save_path to keep one. Returns the socket's compact
+    grayscale preview inline. Set include_full_png=True to also embed the
+    full PNG inline (large — prefer reading the saved file directly instead).
+
+    Paths are on the SERVER host. When the server runs a network transport,
+    the result also carries a URL for the saved PNG (see get_file_url), so a
+    remote client can fetch the full-resolution file.
     """
-    path = save_path or os.path.join(tempfile.gettempdir(), "vphone-mcp-screen.png")
+    path = save_path or str(files.screenshot_dir() / "screen.png")
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     resp = _client().screenshot(path)
     _require_ok(resp)
+
+    status = f"saved: {path}"
+    if url := files.url_for(path):
+        status += f"\nurl: {url}"
 
     blocks: list[dict] = []
     if include_full_png:
@@ -168,7 +177,36 @@ def screenshot(
                 "mimeType": "image/png",
             }
         )
-    return blocks + image_block(resp)
+    return [{"type": "text", "text": status}] + blocks + image_block(resp)
+
+
+@mcp.tool()
+def get_file_url(path: str) -> str:
+    """Return a fetchable URL for a file on the server host.
+
+    Use this for anything a tool left on disk that the client cannot read
+    directly: a saved screenshot, a launch log under
+    $VPHONE_ROOT/vphone-mcp/logs/. The URL carries the path's hash and the MCP
+    token as Basic credentials, so `curl -O <url>` works as-is.
+
+    Only files inside $VPHONE_ROOT/vphone-mcp are served — write anything the
+    client has to fetch there (e.g. vm_export(out=...)). Anything else raises,
+    as does a path that does not exist. Available only when the server runs a
+    network transport — on stdio the path is already local to the client.
+    """
+    if not files.enabled():
+        raise RuntimeError(
+            "File serving is not active: this server is running on stdio (the "
+            "path is already local to the client) or was started with --no-files."
+        )
+    if not files.in_scope(path):
+        raise ValueError(files.scope_error(path))
+    if not Path(path).expanduser().exists():
+        raise FileNotFoundError(f"{path} does not exist on the server host")
+    url = files.url_for(path)
+    if url is None:  # pragma: no cover — scope was just checked
+        raise ValueError(files.scope_error(path))
+    return url
 
 
 @mcp.tool()
@@ -403,7 +441,7 @@ def _guest_network() -> str:
     # 2) Historical candidates: per-VM newest launch logs (the serial
     #    prints the DHCP address sometimes; the log stem is the VM name).
     try:
-        log_dir = Path.home() / ".vphone" / "vphone-mcp" / "logs"
+        log_dir = files.log_dir()
         by_stem: dict[str, list[Path]] = {}
         for p in log_dir.glob("*_launch_*.log"):
             stem = p.name.split("_launch_")[0]
@@ -530,6 +568,14 @@ def vphone_status() -> str:
 # introspects the function signature to build its schema. exec-based function
 # generation is standard for this pattern and keeps the registry data-driven.
 
+def _background_result(res: dict) -> str:
+    """JSON for a detached launch, plus a fetchable log URL when serving remotely."""
+    payload = {"started": res["pid"], "log": res["log_path"], "argv": res["argv"]}
+    if url := files.url_for(res["log_path"]):
+        payload["log_url"] = url
+    return json.dumps(payload)
+
+
 def _spec_kind(spec: dict) -> str:
     for kind in ("flag", "option", "option_multi", "positional"):
         if kind in spec:
@@ -632,10 +678,7 @@ def _register_cli_tools() -> None:
             body.append(
                 f"        _res = run_background({cmd_key!r}, {', '.join(call_parts)})"
             )
-            body.append(
-                '        return json.dumps({"started": _res["pid"], '
-                '"log": _res["log_path"], "argv": _res["argv"]})'
-            )
+            body.append("        return _background_result(_res)")
             body.append(
                 f"    return format_result(run({cmd_key!r}, {', '.join(call_parts)}))"
             )
@@ -644,10 +687,7 @@ def _register_cli_tools() -> None:
             body.append(
                 f"    _res = run_background({cmd_key!r}, {', '.join(call_parts)})"
             )
-            body.append(
-                '    return json.dumps({"started": _res["pid"], '
-                '"log": _res["log_path"], "argv": _res["argv"]})'
-            )
+            body.append("    return _background_result(_res)")
         else:
             body.append(
                 f"    return format_result(run({cmd_key!r}, {', '.join(call_parts)}))"
@@ -658,6 +698,7 @@ def _register_cli_tools() -> None:
             "run": run,
             "run_background": run_background,
             "format_result": format_result,
+            "_background_result": _background_result,
             "json": json,
             "os": os,
         }
@@ -676,7 +717,15 @@ _register_cli_tools()
 # ---------------------------------------------------------------------------
 
 def main():
-    mcp.run(transport="stdio")
+    """Serve the tools over stdio (default) or a remote HTTP transport.
+
+    Transport, bind address and the bearer token come from the environment
+    (and optional CLI flags) — see :mod:`vphone_mcp.remote`. Imported lazily so
+    a stdio launch never pays for starlette/uvicorn.
+    """
+    from .remote import parse_config, run_server
+
+    run_server(mcp, parse_config())
 
 
 if __name__ == "__main__":
